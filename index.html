@@ -12,7 +12,7 @@
     overflow: hidden; height: 100vh; }
   body.overlay #app { height: 100%; box-sizing: border-box; padding: 0 24px; gap: 24px;
     display: flex; flex-direction: row; align-items: center; }
-  body.info-top #app { flex-direction: column; gap: 0; padding: 12px 24px 0; }
+  body.info-top #app { flex-direction: column; gap: 8px; padding: 12px 24px 0; }
   #lyrics { flex: 1; align-self: stretch; min-width: 0; min-height: 0; position: relative; overflow: hidden;
     text-align: center;
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 10%, #000 90%, transparent 100%);
@@ -20,6 +20,7 @@
   #info { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; max-width: 38%; text-align: left;
     text-shadow: 0 2px 8px rgba(0,0,0,.8); transition: opacity .5s; }
   body.info-top #info { max-width: 100%; }
+  body.info-left #info { flex-direction: row-reverse; }
   #art { width: var(--art); height: var(--art); border-radius: 10px; object-fit: cover; flex: none;
     box-shadow: 0 4px 16px rgba(0,0,0,.5); background: rgba(0,0,0,.25); }
   #meta { min-width: 0; }
@@ -98,7 +99,7 @@ function showSetup() {
     ${rt ? `<h3>OBS Browser Source URL</h3>
     <input id="url" readonly value="${obsUrl}">
     <p class="muted">Keep this URL private; it contains your refresh token. Options (after the token, joined with &amp;):
-    <code>size</code> (px), <code>color</code> (hex without #), <code>offset</code> (ms, negative = earlier), <code>lines</code> (1, 3 or 5), <code>dim</code> (0 to 1, brightness of the other lines), <code>info</code> (left, top or off), <code>art</code> (album art size in px), <code>font</code>.
+    <code>size</code> (px), <code>color</code> (hex without #), <code>offset</code> (ms, negative = earlier), <code>lines</code> (1, 3 or 5), <code>dim</code> (0 to 1, brightness of the other lines), <code>info</code> (top, left or off), <code>align</code> (left, center or right; with info=top), <code>art</code> (album art size in px), <code>font</code>.
     Suggested OBS size 1280x300. Clear the default custom CSS in OBS.</p>` : ""}
   </main>`;
   document.getElementById("connect").onclick = async () => {
@@ -127,14 +128,18 @@ function startOverlay(initialRt) {
   const nLines = [1, 3, 5].includes(+hashParams.get("lines")) ? +hashParams.get("lines") : 3;
   const half = (nLines - 1) / 2;
 
-  const infoMode = hashParams.get("info") || "left";   // left | top | off
+  const infoMode = hashParams.get("info") || "top";   // top | left | off
   if (hashParams.get("art")) root.setProperty("--art", hashParams.get("art") + "px");
+  else if (infoMode === "top") root.setProperty("--art", "96px");
   if (infoMode === "top") document.body.classList.add("info-top");
+  else if (infoMode === "left") document.body.classList.add("info-left");
   app.innerHTML = (infoMode === "off" ? "" :
-    '<div id="info" style="opacity:0"><img id="art" alt=""><div id="meta"><div id="title"></div><div id="artist"></div></div></div>') +
+    '<div id="info" style="opacity:0"><div id="meta"><div id="title"></div><div id="artist"></div></div><img id="art" alt=""></div>') +
     '<div id="lyrics"><div id="track"></div></div>';
   const track = document.getElementById("track");
   const infoEl = document.getElementById("info");
+  const alignMap = { left: "flex-start", center: "center", right: "flex-end" };
+  if (infoEl && alignMap[hashParams.get("align")]) infoEl.style.alignSelf = alignMap[hashParams.get("align")];
   let els = [];
 
   let refreshToken = initialRt, accessToken = null, expires = 0;
