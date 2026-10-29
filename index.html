@@ -142,6 +142,14 @@ function startOverlay(initialRt) {
   if (infoEl && alignMap[hashParams.get("align")]) infoEl.style.alignSelf = alignMap[hashParams.get("align")];
   let els = [];
 
+  // optional: add &debug=1 to the URL to show lyric lookup status in the corner
+  const statusEl = hashParams.get("debug") ? document.createElement("div") : null;
+  if (statusEl) {
+    statusEl.style.cssText = "position:fixed;left:8px;bottom:4px;font:12px monospace;color:#ff0;text-shadow:0 1px 2px #000;z-index:9";
+    document.body.appendChild(statusEl);
+  }
+  const setStatus = s => { if (statusEl) statusEl.textContent = s; };
+
   let refreshToken = initialRt, accessToken = null, expires = 0;
   async function getToken() {
     if (accessToken && Date.now() < expires - 30000) return accessToken;
@@ -154,40 +162,66 @@ function startOverlay(initialRt) {
 
   // state
   let trackId = null, lyrics = [], progress = 0, playing = false, syncedAt = 0, lastIdx = -2;
+  let attempts = 0, lastTry = 0, loadingFor = null;
   const cache = new Map();
 
   function parseLrc(lrc) {
     const out = [];
-    for (const raw of lrc.split("\n")) {
-      const m = raw.match(/^\[(\d+):(\d+(?:\.\d+)?)\](.*)$/);
-      if (m) out.push({ t: (parseInt(m[1], 10) * 60 + parseFloat(m[2])) * 1000, text: m[3].trim() });
+    for (const raw of lrc.split(/\r?\n/)) {
+      const stamps = [...raw.matchAll(/\[(\d+):(\d+(?:[.:]\d+)?)\]/g)];   // a line can carry several timestamps
+      if (!stamps.length) continue;
+      const text = raw.replace(/\[[^\]]*\]/g, "").trim();
+      for (const m of stamps) out.push({ t: (parseInt(m[1], 10) * 60 + parseFloat(m[2].replace(":", "."))) * 1000, text });
     }
     return out.sort((a, b) => a.t - b.t);
   }
 
   async function fetchLyrics(item) {
     if (cache.has(item.id)) return cache.get(item.id);
-    const q = new URLSearchParams({
-      track_name: item.name, artist_name: item.artists[0].name,
-      album_name: item.album.name, duration: Math.round(item.duration_ms / 1000)
-    });
+    const artist = item.artists[0].name, dur = item.duration_ms / 1000;
+    // "Song (feat. X) - Remastered 2011" -> "Song": exact titles often don't match LRCLIB's
+    const clean = item.name.replace(/\s*[\(\[][^\)\]]*[\)\]]/g, "").replace(/\s+-\s+.*$/, "").trim() || item.name;
     const timedFetch = (url, ms = 8000) => {
       const c = new AbortController();
       setTimeout(() => c.abort(), ms);
       return fetch(url, { signal: c.signal });
     };
+    const getJson = async url => { const r = await timedFetch(url); return r.ok ? r.json() : null; };
+    const search = params => getJson("https://lrclib.net/api/search?" + new URLSearchParams(params));
+    // best synced result whose length is close to the Spotify track's
+    const pick = list => {
+      const gap = x => Math.abs((x.duration || dur) - dur);
+      const c = (list || []).filter(x => x.syncedLyrics && gap(x) <= 15).sort((a, b) => gap(a) - gap(b));
+      return c[0] ? c[0].syncedLyrics : null;
+    };
     let synced = null, failed = false;
     try {
-      let r = await timedFetch("https://lrclib.net/api/get?" + q);
-      if (r.ok) synced = (await r.json()).syncedLyrics;
-      if (!synced) {
-        r = await timedFetch("https://lrclib.net/api/search?" + new URLSearchParams({ track_name: item.name, artist_name: item.artists[0].name }));
-        if (r.ok) synced = ((await r.json()).find(x => x.syncedLyrics) || {}).syncedLyrics;
-      }
+      const exact = await getJson("https://lrclib.net/api/get?" + new URLSearchParams({
+        track_name: item.name, artist_name: artist, album_name: item.album.name, duration: Math.round(dur)
+      }));
+      synced = exact && exact.syncedLyrics;
+      if (!synced) synced = pick(await search({ track_name: item.name, artist_name: artist }));
+      if (!synced && clean !== item.name) synced = pick(await search({ track_name: clean, artist_name: artist }));
+      if (!synced) synced = pick(await search({ q: clean + " " + artist }));
     } catch (e) { failed = true; console.warn("lrclib", e); }
     const parsed = synced ? parseLrc(synced) : [];
-    if (!failed) cache.set(item.id, parsed);   // don't cache network failures
+    parsed.status = failed ? "lookup failed (network)" : parsed.length ? "ok" : "no synced lyrics found";
+    if (parsed.length) cache.set(item.id, parsed);   // only keep successes; misses get retried
     return parsed;
+  }
+
+  // Loads lyrics for the current song; poll() calls this again if a lookup came up empty.
+  function loadLyrics(item) {
+    const id = item.id;
+    loadingFor = id; attempts++; lastTry = Date.now();
+    setStatus(`searching lyrics (try ${attempts})...`);
+    fetchLyrics(item)
+      .then(ls => {
+        if (id === trackId && ls.length) { lyrics = ls; lastIdx = -2; }
+        setStatus(`${item.name}: ${ls.status || "ok"} (try ${attempts})`);
+      })
+      .catch(e => console.warn(e))
+      .finally(() => { if (loadingFor === id) loadingFor = null; });
   }
 
   function showInfo(item) {
@@ -212,14 +246,12 @@ function startOverlay(initialRt) {
         if (d.item && d.currently_playing_type === "track") {
           progress = d.progress_ms; playing = d.is_playing; syncedAt = performance.now();
           if (d.item.id !== trackId) {
-            trackId = d.item.id; lyrics = []; lastIdx = -2;
+            trackId = d.item.id; lyrics = []; lastIdx = -2; attempts = 0; lastTry = 0;
             showInfo(d.item);
-            const id = trackId;
-            // don't await: a slow lyrics lookup must never block Spotify polling
-            fetchLyrics(d.item)
-              .then(ls => { if (id === trackId) { lyrics = ls; lastIdx = -2; } })
-              .catch(e => console.warn(e));
           }
+          // Not awaited: a slow lyrics lookup must never block Spotify polling.
+          // If a lookup came up empty, try again a few times (LRCLIB can be flaky).
+          if (!lyrics.length && loadingFor !== d.item.id && attempts < 4 && Date.now() - lastTry > 15000) loadLyrics(d.item);
         }
       }
     } catch (e) { console.warn(e); }
