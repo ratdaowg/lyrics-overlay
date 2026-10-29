@@ -5,13 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Spotify Lyrics Overlay</title>
 <style>
-  :root { --size: 44px; --color: #ffffff; --dim: .35; --font: "Segoe UI", system-ui, sans-serif; }
+  :root { --size: 44px; --color: #ffffff; --dim: .35; --art: 120px; --font: "Segoe UI", system-ui, sans-serif; }
   html { background: transparent !important; }
   body { margin: 0; }
   body.overlay { background: transparent !important; font-family: var(--font); color: var(--color);
-    overflow: hidden; height: 100vh; position: relative; text-align: center;
+    overflow: hidden; height: 100vh; }
+  body.overlay #app { height: 100%; box-sizing: border-box; padding: 0 24px; gap: 24px;
+    display: flex; flex-direction: row; align-items: center; }
+  body.info-top #app { flex-direction: column; gap: 0; padding: 12px 24px 0; }
+  #lyrics { flex: 1; align-self: stretch; min-width: 0; min-height: 0; position: relative; overflow: hidden;
+    text-align: center;
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 10%, #000 90%, transparent 100%);
     mask-image: linear-gradient(to bottom, transparent 0%, #000 10%, #000 90%, transparent 100%); }
+  #info { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; max-width: 38%; text-align: left;
+    text-shadow: 0 2px 8px rgba(0,0,0,.8); transition: opacity .5s; }
+  body.info-top #info { max-width: 100%; }
+  #art { width: var(--art); height: var(--art); border-radius: 10px; object-fit: cover; flex: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,.5); background: rgba(0,0,0,.25); }
+  #meta { min-width: 0; }
+  #title { font-size: calc(var(--size) * .55); font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+  #artist { font-size: calc(var(--size) * .42); opacity: .8; margin-top: .2em; overflow-wrap: anywhere; }
   #track { position: absolute; left: 0; right: 0; top: 50%; will-change: transform;
     transition: transform .6s cubic-bezier(.22, .8, .3, 1); }
   .line { font-size: var(--size); font-weight: 700; line-height: 1.25; padding: .25em 24px; opacity: 0;
@@ -85,7 +98,7 @@ function showSetup() {
     ${rt ? `<h3>OBS Browser Source URL</h3>
     <input id="url" readonly value="${obsUrl}">
     <p class="muted">Keep this URL private; it contains your refresh token. Options (after the token, joined with &amp;):
-    <code>size</code> (px), <code>color</code> (hex without #), <code>offset</code> (ms, negative = earlier), <code>lines</code> (1, 3 or 5), <code>dim</code> (0 to 1, brightness of the other lines), <code>font</code>.
+    <code>size</code> (px), <code>color</code> (hex without #), <code>offset</code> (ms, negative = earlier), <code>lines</code> (1, 3 or 5), <code>dim</code> (0 to 1, brightness of the other lines), <code>info</code> (left, top or off), <code>art</code> (album art size in px), <code>font</code>.
     Suggested OBS size 1280x300. Clear the default custom CSS in OBS.</p>` : ""}
   </main>`;
   document.getElementById("connect").onclick = async () => {
@@ -114,8 +127,14 @@ function startOverlay(initialRt) {
   const nLines = [1, 3, 5].includes(+hashParams.get("lines")) ? +hashParams.get("lines") : 3;
   const half = (nLines - 1) / 2;
 
-  app.innerHTML = '<div id="track"></div>';
+  const infoMode = hashParams.get("info") || "left";   // left | top | off
+  if (hashParams.get("art")) root.setProperty("--art", hashParams.get("art") + "px");
+  if (infoMode === "top") document.body.classList.add("info-top");
+  app.innerHTML = (infoMode === "off" ? "" :
+    '<div id="info" style="opacity:0"><img id="art" alt=""><div id="meta"><div id="title"></div><div id="artist"></div></div></div>') +
+    '<div id="lyrics"><div id="track"></div></div>';
   const track = document.getElementById("track");
+  const infoEl = document.getElementById("info");
   let els = [];
 
   let refreshToken = initialRt, accessToken = null, expires = 0;
@@ -166,12 +185,22 @@ function startOverlay(initialRt) {
     return parsed;
   }
 
+  function showInfo(item) {
+    if (!infoEl) return;
+    const imgs = item.album.images || [];
+    const img = imgs[1] || imgs[0];
+    document.getElementById("art").src = img ? img.url : "";
+    document.getElementById("title").textContent = item.name;
+    document.getElementById("artist").textContent = item.artists.map(a => a.name).join(", ");
+    infoEl.style.opacity = 1;
+  }
+
   async function poll() {
     try {
       const r = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
         headers: { Authorization: "Bearer " + await getToken() }
       });
-      if (r.status === 204 || r.status === 202) { playing = false; lyrics = []; trackId = null; lastIdx = -2; render(true); }
+      if (r.status === 204 || r.status === 202) { playing = false; lyrics = []; trackId = null; lastIdx = -2; render(true); if (infoEl) infoEl.style.opacity = 0; }
       else if (r.status === 429) { await new Promise(res => setTimeout(res, (+r.headers.get("Retry-After") || 5) * 1000)); }
       else if (r.ok) {
         const d = await r.json();
@@ -179,6 +208,7 @@ function startOverlay(initialRt) {
           progress = d.progress_ms; playing = d.is_playing; syncedAt = performance.now();
           if (d.item.id !== trackId) {
             trackId = d.item.id; lyrics = []; lastIdx = -2;
+            showInfo(d.item);
             const id = trackId;
             // don't await: a slow lyrics lookup must never block Spotify polling
             fetchLyrics(d.item)
